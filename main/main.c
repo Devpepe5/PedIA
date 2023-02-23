@@ -17,6 +17,7 @@
 //#include "driver/i2s.h"
 #include "esp_log.h"
 #include "esp_adc/adc_continuous.h"
+#include "continuousADC.h"
 //#include <freertos/timers.h>
 //#include "driver/timer.h"
 #define RATE_HZ_1a1000                  (200)
@@ -36,6 +37,8 @@
 #define BUFFER_LEN_                      (CONVERSION_FRAME_SIZE)// SI Y SOLO SI BUFFER%4 =0
 //lista de canales a usar
 static adc_channel_t channel_list[ADCINPUTSNUM]={ADC_CHANNEL_6, ADC_CHANNEL_7};
+
+
 
  
 //variables globales
@@ -59,9 +62,16 @@ void lectura_i2s_ADC(void *parameters)// puedo usar un puntero al buffer
 }
 */
 
-static void adc_continuous_init(adc_channel_t *channel_list, uint8_t canales_numero, adc_continuous_handle_t *handle_salida );
+void adc_continuous_init(adc_channel_t *channel_list, uint8_t canales_numero, adc_continuous_handle_t *handle_salida );
 void procesado(void *parametros);
 void lectura_adc(void *parametros);
+void promedio();  // mean average value MAV 
+void RMS();// root mean square
+void longitud_de_onda(); //Wave length WL
+void cruces_por0(); //zero crossing
+void SSC();//Slope Scope Change (SSC) "Cambio de alcance de pendiente". según el traductor 
+
+
 /*EL uso de callback de timer se reserva para otro uso 
 void CallbackMuestreo(TimerHandle_t xTimer)
 {
@@ -72,14 +82,16 @@ void CallbackMuestreo(TimerHandle_t xTimer)
 }
 */
 
+
 void app_main(void)
 {   
     
-    
     //SemaphoreHandle_t ADCdone=NULL;
-    static uint8_t bufferADC[BUFFER_LEN_] = {0};
-    esp_err_t ret;
-    volatile uint32_t numSamples=0;
+     uint8_t bufferADC[BUFFER_LEN_] = {0};
+     uint16_t  numSamples=0;
+    uint16_t *pnumSamples=&numSamples;
+
+
 
 
 
@@ -88,56 +100,29 @@ void app_main(void)
     //int procesosNum=2;
     //uint8_t ADC_BITWIDTH=12;
     memset(bufferADC, 0xcc, BUFFER_LEN_);
-    adc_continuous_handle_t handle = NULL;
-    void *ADC_args[5]={&bufferADC, &handle, &numSamples}; //arreglo de argumentos para poder acceder a cada dato que necesitaremos 
-    adc_continuous_init(channel_list, sizeof(channel_list) / sizeof(adc_channel_t), &handle );
+     static adc_continuous_handle_t handle = NULL;
+     adc_continuous_handle_t *phandle = &handle;
+    //void *ADC_args[3]={bufferADC, &handle, pnumSamples}; //arreglo de argumentos para poder acceder a cada dato que necesitaremos 
+    adc_continuous_init(channel_list, sizeof(channel_list) / sizeof(adc_channel_t), phandle);
     
+    static continuous_args  ADC_args_struct;
+    ADC_args_struct.buffer= bufferADC;
+    ADC_args_struct.handle= phandle; 
+    ADC_args_struct.numSamples = pnumSamples;
+    continuous_args *pADC_args=&ADC_args_struct;
 
-   
-//        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    printf("puntero a enviar: bufferADC: %p  handle: %p numero de muestras  %p numero de muestra pero  con &: %p \n", ADC_args_struct.buffer, ADC_args_struct.handle, ADC_args_struct.numSamples , &numSamples);
+    ESP_ERROR_CHECK(adc_continuous_start(handle));
 
-    
-     //   ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-
-    //lectura 
-    
-    //ESP_ERROR_CHECK(adc_continuous_read(handle, bufferADC, BUFFER_LEN_, &numSamples, 0));
-    //vTaskDelay(10/portTICK_PERIOD_MS);
-    
-    vTaskDelay(11);
-    
-    printf("fin de la lectura\n");
-    
-    
-
-  //  ADCdone=xSemaphoreCreateCounting(procesosNum,0);
-    
-
-/*            xTaskCreate(promediarBuffer,
-                    "promedio del buffer",
-                    1024,
-                    (void *)avrgBuffer,
-                    configMAX_PRIORITIES-2,
-                    NULL);
- 
-
-            xTaskCreate(mostrarBuffer,
-                    "mostrar buffer en pantalla",
-                    1024,
-                    (void *)bufferADC,
-                    configMAX_PRIORITIES-2,
-                    NULL);
-
-*/
-xTaskCreate(lectura_adc, "Lectura continua ADC", 1024*2,(void*)ADC_args,1,NULL);
+xTaskCreate(lectura_adc, "Lectura continua ADC", 1024*4,(void*)pADC_args , configMAX_PRIORITIES-1,NULL);
 }
 //    ESP_ERROR_CHECK(adc_continuous_stop(handle));
 //    ESP_ERROR_CHECK(adc_continuous_deinit(handle));
 
 //Funciones
-static void adc_continuous_init(adc_channel_t *channel_list, uint8_t canales_numero, adc_continuous_handle_t *handle_salida )
+void adc_continuous_init(adc_channel_t *channel_list, uint8_t canales_numero, adc_continuous_handle_t *handle_salida )
 {
-int inputs_num=ADCINPUTSNUM;
+
     
     static adc_continuous_handle_t handle=NULL;//inicio el handler
     adc_continuous_handle_cfg_t configHandleADCContinuo= { 
@@ -154,7 +139,7 @@ int inputs_num=ADCINPUTSNUM;
     
     adc_digi_pattern_config_t adc_patron[ADCINPUTSNUM];
     //uint8_t bitwidth=12;
-    // a Través de un bucle gradamos todos los valores que serán similares
+    // a Través de un bucle guardamos todos los valores que serán similares
     for (uint16_t i= 0 ; i<canales_numero ; i++){
     adc_patron[i].atten=ADC_ATTEN_DB_11;      ///< Attenuation of this ADC channel
     adc_patron[i].channel=channel_list[i]&0x7;    ///< ADC channel
@@ -162,44 +147,52 @@ int inputs_num=ADCINPUTSNUM;
     adc_patron[i].bit_width=ADC_BITWIDTH_12; //profundidad maxima
     }
     digitalConfigADC.adc_pattern=adc_patron;// 
-    
-    ESP_ERROR_CHECK(adc_continuous_config(handle, &digitalConfigADC));
-    ESP_ERROR_CHECK(adc_continuous_start(handle));
+    ESP_ERROR_CHECK(adc_continuous_config(handle, &digitalConfigADC));   
     *handle_salida=handle;
+    printf("inicialización exitosa\n");
+
 }
 
 //void *ADC_args[5]={&bufferADC, &handle, &numSamples};// copia de la declaracion para tener referencia
 void lectura_adc(void *parametros)
 {   
-    void *ADC_args[5]={(void *)parametros};
-    static uint8_t bufferADC[BUFFER_LEN_]={};
-    *bufferADC=(uint8_t *)ADC_args[0];
-    adc_continuous_handle_t handle*;
-    handle=(adc_continuous_handle_t *)ADC_args[1];
-    volatile uint32_t *numSamples;
-    numSamples= (uint32_t *)ADC_args[2];
-
-    esp_err_t ret;
+    continuous_args *pDatos=(continuous_args*)parametros;
     
-    printf("inicia la lectura\n");
+    uint8_t *bufferADC=(pDatos->buffer);
+    adc_continuous_handle_t *handle =(pDatos->handle);
+    uint16_t *num_Samples = (pDatos->numSamples);
+    //printf("punteros recibidos buffer : %p, puntero handle: %p, puntero del numero de muestras: %p \n", ADC_args[0], ADC_args[1], ADC_args[2]);
+     printf("punteros recibidos buffer : %p, puntero handle: %p, puntero del numero de muestras: %p \n", bufferADC, handle, (pDatos->numSamples));
+    esp_err_t ret;  
+    
+    //printf("inicia la lectura numero de muestras inicial: %lu \n", numSamples);
+
     while(1)
     {
-    ret = adc_continuous_read(handle, bufferADC, BUFFER_LEN_, &numSamples, 0);
+    ret = adc_continuous_read(*handle, bufferADC, BUFFER_LEN_,num_Samples, 0);
     if ((ret)==ESP_OK)
     {
     printf("Lectura exitosa");
-    for (uint32_t i=0;i=num_samples;i += SOC_ADC_DIGI_RESULT_BYTES )// que haga la suma de cuantos bytes va avanzando "creo"
+    for (uint32_t i=0;i<*num_Samples;i += SOC_ADC_DIGI_RESULT_BYTES )// que haga la suma de cuantos bytes va avanzando "creo"
     {
         adc_digi_output_data_t *p = (void*)&bufferADC[i];
-                    uint32_t chan_num = EXAMPLE_ADC_GET_CHANNEL(p);
-                    uint32_t data = EXAMPLE_ADC_GET_DATA(p);
-                    printf("");
+                    uint32_t chan_num = ADC_GET_CHANNEL(p);
+                    uint32_t data = ADC_GET_DATA(p);
+                    printf("canal: %lu valor: %lu \n",chan_num, data);//muestreo de valores
+
     }
     }
+    vTaskDelay(1);
     }
 }
-/*
-void procesado(void *parametros)
+
+
+ 
+void RMS();// root mean square
+void longitud_de_onda(); //Wave length WL
+void cruces_por0(); //zero crossing
+//Slope Scope Change (SSC) "Cambio de alcance de pendiente". según el traductor 
+void promedio()  // mean average value MAV
 {
     adc_digi_output_data_t *pBuffer = (void*)&bufferADC[0];
     uint32_t canal[ADCINPUTSNUM]={0};
@@ -213,4 +206,6 @@ void procesado(void *parametros)
     }
      
 }
-*/
+void SSC(){
+
+}
