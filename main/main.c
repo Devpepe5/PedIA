@@ -22,23 +22,6 @@
 #include <math.h>
 //#include <freertos/timers.h>
 //#include "driver/timer.h"
-#define RATE_HZ_1a1000                  (200)
-
-#define MUESTREOTICKSTOWAIT             (RATE_HZ_1a1000/1000)
-#define ADC_BIT_WIDTH                   (12)
-//static TimerHandle_t muestreo// 
-//static hw_timer_t *timer = NULL; // handler del timer
-
-//static float lecturas               [1000]
-#define ADCINPUTSNUM                    (2)
-#define SAMPLERATE                  (ADCINPUTSNUM*10*1000) //numero de entradas por ratesample unitario
-#define ADC_GET_CHANNEL(pDato)      ((pDato)->type2.channel)
-#define ADC_GET_DATA(pDato)         ((pDato)->type2.data)
-#define CONVERSION_FRAME_SIZE       (100) // número de muestras que se van a tomar por lectura
-#define MAX_BUFFER_SIZE             (10*(CONVERSION_FRAME_SIZE))
-#define BUFFER_LEN_                 (CONVERSION_FRAME_SIZE)// SI Y SOLO SI BUFFER%4 =0
-#define MAX_ADC_mVOLT               (3300) //maximo valor de lectura en milivolts
-#define DMAX                        (4095)  // valor maximo digital 2^12
 //lista de canales a usar
 static adc_channel_t channel_list[ADCINPUTSNUM]={ADC_CHANNEL_6, ADC_CHANNEL_7};
 
@@ -101,14 +84,18 @@ void app_main(void)
      uint32_t  numSamples=0,*pnumSamples;
      pnumSamples =&numSamples;
     //metricas estadisticas
-    float promedio, *ppromedio, varianza, *pvarianza, desv_std, *pdesv_std, energia_promedio, *p_energia_promedio;
-    float zc, *pzc; 
+    float promedio[ADCINPUTSNUM],  varianza[ADCINPUTSNUM], desv_std[ADCINPUTSNUM],  energia_promedio[ADCINPUTSNUM], zc[ADCINPUTSNUM];
+    float wl[ADCINPUTSNUM],ssc[ADCINPUTSNUM];
+
+
+//  float *ppromedio, *pzc, *pdesv_std, *pvarianza, *p_energia_promedio  
+/*
     pzc = &zc;
     ppromedio = &promedio;
     pvarianza = &varianza;
     pdesv_std = &desv_std;
     p_energia_promedio = &energia_promedio;
-
+*/
 
 
     //uint16_t avrgBuffer=0;
@@ -125,11 +112,14 @@ void app_main(void)
     
     static metricas_estadisticas metrics;
     //almaceno la dirección de las variables
-    metrics.promedio=ppromedio;
-    metrics.varianza=pvarianza;
-    metrics.desv_std=pdesv_std; //desviación standard 
-    metrics.energia_promedio=p_energia_promedio; 
-    metrics.zc=pzc;
+    metrics.promedio=promedio;
+    metrics.varianza=varianza;
+    metrics.desv_std=desv_std; //desviación standard 
+    metrics.energia_promedio=energia_promedio; 
+    metrics.zc=zc;
+    metrics.ssc= ssc;
+    metrics.wl=wl;
+
     metricas_estadisticas *pmetrics =&metrics; // estrucutra para almacenar resultados procesados
     
     static continuous_args  ADC_args_struct;
@@ -137,16 +127,17 @@ void app_main(void)
     ADC_args_struct.handle= phandle; 
     ADC_args_struct.numSamples = pnumSamples;
     ADC_args_struct.metrics=pmetrics;
-    ADC_args_struct.voltsBuffer=vectorPruebaZC; //Asiganación de prueba para comprobar correcta aplicación de función zerocross()
-    //ADC_args_struct.voltsBuffer=voltsBuffer;
+    //ADC_args_struct.ssc=ssc;
+    //ADC_args_struct.voltsBuffer=vectorPruebaZC; //Asiganación de prueba para comprobar correcta aplicación de función zerocross()
+    ADC_args_struct.voltsBuffer=voltsBuffer;
     continuous_args *pADC_args=&ADC_args_struct;
     //cruces_por0(pADC_args, pmetrics);
     zerocross(&ADC_args_struct);
 
     //printf("puntero a enviar: bufferADC: %p  handle: %p numero de muestras  %p numero de muestra pero  con &: %p \n", ADC_args_struct.buffer, ADC_args_struct.handle, ADC_args_struct.numSamples , &numSamples);// chequeo de punteros 
     ESP_ERROR_CHECK(adc_continuous_start(handle));
-    
-    printf("zc calculado por el micro= %.3f zc calculado por matlab %.3f ", zc, valorZCEsperado);
+
+    //printf("zc calculado por el micro= %.3f zc calculado por matlab %.3f ", zc, valorZCEsperado);
     vTaskDelay(10*100/portTICK_PERIOD_MS);
     xTaskCreate(lectura_adc, "Lectura continua ADC", 1024*4,(void*)pADC_args , configMAX_PRIORITIES-1,NULL);
 }
@@ -165,7 +156,7 @@ void lectura_adc(void *parametros)
     uint32_t *num_Samples = (pDatos->numSamples);
     float *voltsBuffer= (pDatos->voltsBuffer);
     //printf("punteros recibidos buffer : %p, puntero handle: %p, puntero del numero de muestras: %p \n", ADC_args[0], ADC_args[1], ADC_args[2]);
-     printf("punteros recibidos buffer : %p, puntero handle: %p, puntero del numero de muestras: %p \n", bufferADC, handle, (pDatos->numSamples));
+    printf("punteros recibidos buffer : %p, puntero handle: %p, puntero del numero de muestras: %p \n", bufferADC, handle, (pDatos->numSamples));
     
     esp_err_t ret;  
     
@@ -177,16 +168,6 @@ void lectura_adc(void *parametros)
     if ((ret)==ESP_OK)
     {
     printf("Lectura exitosa");
-    for (uint32_t i=0;i<*num_Samples;i += SOC_ADC_DIGI_RESULT_BYTES )// que haga la suma de cuantos bytes va avanzando "creo"
-    {
-        adc_digi_output_data_t *p = (void*)&bufferADC[i];
-                    uint32_t chan_num = ADC_GET_CHANNEL(p);
-                    uint32_t data = ADC_GET_DATA(p);
-                    printf("canal: %lu valor: %lu \n",chan_num, data);//muestreo de valores
-                    voltsBuffer[i]= data*(MAX_ADC_mVOLT/DMAX);
-                    printf("canal: %lu valor: %.3f \n",chan_num, voltsBuffer[i]);//muestreo de valores reales //   
-    }
-                    
     }
     
     vTaskDelay(1);
@@ -196,61 +177,106 @@ void lectura_adc(void *parametros)
 
 
 void procesado(void *parametros){
+    //variabbles de entrada
+    continuous_args *args = (continuous_args*)parametros ;
+    uint8_t *bufferADC=(args->buffer);
+    adc_continuous_handle_t *handle =(args->handle);
+    uint32_t *num_Samples = (args->numSamples);
+    float *voltsBuffer= (args->voltsBuffer);
+    //variables para procesado 
+    float mean[ADCINPUTSNUM];
+    float zcb[ADCINPUTSNUM];
+    float rms[ADCINPUTSNUM];
+    int ssc[ADCINPUTSNUM];
+    float diffvolts[(*num_Samples)-1];
+    float sumdiffvolts[ADCINPUTSNUM]; //para hacer la sumatoria 
+     for(int i=0;i<ADCINPUTSNUM;i++){
+        mean[i] = 0;
+        zcb[i] =  0;
+        rms[i] = 0;
+        ssc[i]=0;
+        //diffvolts[i]=0;
+        sumdiffvolts[i]=0;
+    }
+    //inicializa las varibles en ceros para 
     
-}
+    float tmp2;  // valor anterior de work
+    float work=0; //valor auxiliar
+    float work_tmp; //; //valor actual temporal
+    float zc;
+    float *zcOUT=args->metrics->zc; //puntero el valor de salida ZC 
+    float *meanOUT=args-> metrics->promedio;  
+    float *wlOUT=args-> metrics->wl;
+    float *rmsOUT=args-> metrics->rms;
+    //float *x= args->voltsBuffer;
+    for (uint32_t i=0;i<*num_Samples;i += SOC_ADC_DIGI_RESULT_BYTES )// que haga la suma de cuantos bytes va avanzando "creo"
+    {
+                    adc_digi_output_data_t *p = (void*)&bufferADC[i];
+                    uint32_t chan_num = ADC_GET_CHANNEL(p);
+                    uint32_t data = ADC_GET_DATA(p);
+                    //printf("canal: %lu valor: %lu \n",chan_num, data);  //  muestreo de valores
+                    voltsBuffer[i]= data*(MAX_ADC_mVOLT/DMAX);  
+                    mean[i % ADCINPUTSNUM]+=voltsBuffer[i];// sumatoria para calcular el promedio 
+                    //printf("canal: %lu valor: %.3f \n",chan_num, voltsBuffer[i]);  //muestreo de valores reales //
+                    rms[i % ADCINPUTSNUM]+= (voltsBuffer[i]*voltsBuffer[i]);
+                    
+                    if (i>ADCINPUTSNUM){
+                        diffvolts[i % ADCINPUTSNUM] = (voltsBuffer[i]-voltsBuffer[i-ADCINPUTSNUM]); // si solo hago i-1 estaría restando el valor de otro canal
+                    }
+                    sumdiffvolts[i % ADCINPUTSNUM] += fabs(diffvolts[i]);
+                    //algoritmo para ZC
+                    work_tmp = voltsBuffer[i];
+                    if (work_tmp < 0.0) {
+                    work_tmp = -1.0;
+                    } else {
+                            work_tmp = (work_tmp > 0.0); //se estaría asignando el valor 1 a partir de resultado de la comparación
+                            }
+                    //algoritmo para SSC
+                    if (diffvolts[i] < 0.0) {
+                    diffvolts[i] = -1.0;
+                    } else {
+                            diffvolts[i] = (diffvolts[i] > 0.0); //se estaría asignando el valor 1 a partir de resultado de la comparación
+                            }   
+                    if(i>ADCINPUTSNUM){
+                        if (diffvolts[i]!=diffvolts[i-ADCINPUTSNUM])
+                        ssc[i % ADCINPUTSNUM]+=1;
+                    }      
+    //este  codigo genera un -1 o 1 a os valores que son menores a cero  y mayores aceros respectivamente
+    //al hacer la resta de valores que tuvieron un cambio anterior 
+    //sumara a zcb el numero 2, un numero distinto a cero
+    tmp2 = work;
+    work = work_tmp;
+    
+    //de esta manera se almacena el valor por canal 
+    zcb[i % ADCINPUTSNUM] += fabs(work_tmp - tmp2);
+    
+    
+    //zc += zcb[i]; //sumatoria de cada vez que cruzo por cero multiplicada por 2 
+
+  }
+  
+
+  //return 0.5 * work_tmp / 100.0; // los return estan prohibidos
+  for (int k=0 ; k<ADCINPUTSNUM ; k++){
+  *(zcOUT+k)= 0.5 * zcb[k] / 100.0;
+  *(meanOUT+k)= mean[k]/(*num_Samples);
+  *(rmsOUT+k)= rms[k]/(*num_Samples);
+  *(wlOUT+k)=sumdiffvolts[k]/(*num_Samples);
+
+    }
+    }
+    
+
 
 
 //Funciones
-void adc_continuous_init(adc_channel_t *channel_list, uint8_t canales_numero, adc_continuous_handle_t *handle_salida )
-{
-
-    
-    static adc_continuous_handle_t handle=NULL;//inicio el handler
-    adc_continuous_handle_cfg_t configHandleADCContinuo= { 
-        .max_store_buf_size = MAX_BUFFER_SIZE,
-        .conv_frame_size = CONVERSION_FRAME_SIZE,
-    }; //declaradción del    la configuración del handler
-    ESP_ERROR_CHECK(adc_continuous_new_handle(&configHandleADCContinuo, &handle));
-    adc_continuous_config_t digitalConfigADC={
-        .sample_freq_hz= SAMPLERATE,                /*!< The expected ADC sampling frequency in Hz. Please refer to `soc/soc_caps.h` to know available sampling frequency range*/
-        .conv_mode=ADC_CONV_SINGLE_UNIT_1,      ///< ADC DMA conversion mode, see `adc_digi_convert_mode_t`.
-        .format=ADC_DIGI_OUTPUT_FORMAT_TYPE1,
-        .pattern_num=ADCINPUTSNUM,
-    };   
-    
-    adc_digi_pattern_config_t adc_patron[ADCINPUTSNUM];
-    //uint8_t bitwidth=12;
-    // a Través de un bucle guardamos todos los valores que serán similares
-    for (uint16_t i= 0 ; i<canales_numero ; i++){
-    adc_patron[i].atten=ADC_ATTEN_DB_11;      ///< Attenuation of this ADC channel
-    adc_patron[i].channel=channel_list[i]&0x7;    ///< ADC channel
-    adc_patron[i].unit=ADC_UNIT_1;       ///< ADC unit
-    adc_patron[i].bit_width=ADC_BITWIDTH_12; //profundidad maxima
-    }
-    digitalConfigADC.adc_pattern=adc_patron;// 
-    ESP_ERROR_CHECK(adc_continuous_config(handle, &digitalConfigADC));   
-    *handle_salida=handle;
-    printf("inicialización exitosa\n");
-
-}
 
 
 
 
 
 //la diferencia entre las tareas "tasks" y las funciones es que las funciones tienesn 
-void RMS(continuous_args *structin, metricas_estadisticas *structout){// root mean square
-    float *volts = structin->voltsBuffer;
-    uint32_t *numSamples=structin->numSamples;
-    float rms=0, *prms;
-    prms=structout->rms;
-    for (uint32_t i=0; i<*numSamples;i++) {
-        rms+=((volts[i])*(volts[i]));
-    }
-        rms=rms/(*numSamples);
-        rms=sqrt(rms);
-        *prms=rms;
-    }
+
 void longitud_de_onda(continuous_args *structin, metricas_estadisticas *structout){ //Wave length WL
 
 } 
@@ -263,20 +289,7 @@ pzc=structout->zc;
 printf("el numero de cruces por cero calculado es: %.3f valor calculado por matlab: %.3f  ",zc ,valorZCEsperado);
 } 
 //Slope Scope Change (SSC) "Cambio de alcance de pendiente". según el traductor 
-void promedio(continuous_args *structin, metricas_estadisticas *structout)  // mean average value MAV
-{   
-    uint32_t *numSamples=structin->numSamples; 
-    float promedio=0, *ppromedio;
-    ppromedio=structout->promedio;
-    uint8_t *bufferADC=structin->buffer;
-    for (int i=0; i<(*numSamples);i++)
-    {
-        promedio=promedio + bufferADC[i];
-    }
-    promedio=promedio/(*numSamples);
-    printf("promedio calculado: %.3f ",promedio);
-    *ppromedio=promedio;    
-}
+
 void SSC(continuous_args *structin, metricas_estadisticas *structout){
 
 }
