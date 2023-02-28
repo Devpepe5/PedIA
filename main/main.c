@@ -27,7 +27,7 @@ static adc_channel_t channel_list[ADCINPUTSNUM]={ADC_CHANNEL_6, ADC_CHANNEL_7};
 
 float vectorPruebaZC[100]= {287, 378, -401, 385,	104, -430, -249, 19, 430, 437, -370, 443, 429, -43, 272, -386, -106, 388, 264, 431, 128, -492, 321, 406, 151, 230, 215, -136, 127, -357, 178, -496, -251, -482, -431, 295, 167, -211, 422, -494, -89, -146, 238, 267, -341, -38, -82, 118, 181, 227, -252, 152, 127, -365, -409, -30, 432, -188, 57, -304, 223, -273, -22, 171, 363, 431, 19, -389, -379, -270, 313, -274, 286, -284, 401, -178, -331, -277, 88, -55, -176, 303, 57, 22, 389, -242, 229, 226, -148, 40, -452, -474, 3, 251, 406, -398, 41, -59, -516, -191};
 float valorZCEsperado=.5350;
-
+static TaskHandle_t procesadotask_handle; //handle para usar notificaciones de tarea (semaforo ligero) 
 /*para su correcta aplicación se tiene que usar un ADC en modo pseudobipolar,
  o restar el valor de offset a el resultado
 */ 
@@ -63,7 +63,14 @@ void longitud_de_onda(continuous_args *structin, metricas_estadisticas *structou
 void cruces_por0(continuous_args *structin, metricas_estadisticas *structout); //zero crossing
 void SSC(continuous_args *structin, metricas_estadisticas *structout);//Slope Scope Change (SSC) "Cambio de alcance de pendiente". según el traductor 
 
+static bool IRAM_ATTR s_conv_done_cb(adc_continuous_handle_t handle, const adc_continuous_evt_data_t *edata, void *user_data)
+{
+    BaseType_t mustYield = pdFALSE;
+    //Notify that ADC continuous driver has done enough number of conversions
+    vTaskNotifyGiveFromISR(procesadotask_handle, &mustYield);
 
+    return (mustYield == pdTRUE);
+}
 /*EL uso de callback de timer se reserva para otro uso 
 void CallbackMuestreo(TimerHandle_t xTimer)
 {
@@ -132,14 +139,19 @@ void app_main(void)
     ADC_args_struct.voltsBuffer=voltsBuffer;
     continuous_args *pADC_args=&ADC_args_struct;
     //cruces_por0(pADC_args, pmetrics);
-    zerocross(&ADC_args_struct);
-
+    //zerocross(&ADC_args_struct);
+    adc_continuous_evt_cbs_t callBackEvent = {// puede avisar que la conversión terminó o que el buffer se lleno 
+        .on_conv_done = s_conv_done_cb,
+    };
+    
     //printf("puntero a enviar: bufferADC: %p  handle: %p numero de muestras  %p numero de muestra pero  con &: %p \n", ADC_args_struct.buffer, ADC_args_struct.handle, ADC_args_struct.numSamples , &numSamples);// chequeo de punteros 
+    ESP_ERROR_CHECK(adc_continuous_register_event_callbacks(handle, &callBackEvent,NULL));
     ESP_ERROR_CHECK(adc_continuous_start(handle));
 
     //printf("zc calculado por el micro= %.3f zc calculado por matlab %.3f ", zc, valorZCEsperado);
     vTaskDelay(10*100/portTICK_PERIOD_MS);
     xTaskCreate(lectura_adc, "Lectura continua ADC", 1024*4,(void*)pADC_args , configMAX_PRIORITIES-1,NULL);
+    xTaskCreate(procesado, "procesado de datos", 1024*4,(void*)pADC_args , configMAX_PRIORITIES-1,NULL);
 }
 //    ESP_ERROR_CHECK(adc_continuous_stop(handle));
 //    ESP_ERROR_CHECK(adc_continuous_deinit(handle));
@@ -149,6 +161,9 @@ void app_main(void)
 //void *ADC_args[5]={&bufferADC, &handle, &numSamples};// copia de la declaracion para tener referencia
 void lectura_adc(void *parametros)
 {   
+    TickType_t xLastWakeTime; //valor para guardar el conteo de ticks
+    xLastWakeTime = xTaskGetTickCount();//current task  tick count 
+
     continuous_args *pDatos=(continuous_args*)parametros;
     
     uint8_t *bufferADC=(pDatos->buffer);
@@ -170,7 +185,7 @@ void lectura_adc(void *parametros)
     printf("Lectura exitosa");
     }
     
-    vTaskDelay(1);
+    xTaskDelayUntil(&xLastWakeTime, 10/portTICK_PERIOD_MS); // con la frecuencia lectura dura 10ms en cada canal 
     }
 }
 
@@ -183,6 +198,11 @@ void procesado(void *parametros){
     adc_continuous_handle_t *handle =(args->handle);
     uint32_t *num_Samples = (args->numSamples);
     float *voltsBuffer= (args->voltsBuffer);
+    float *zcOUT=args->metrics->zc; //puntero el valor de salida ZC 
+    float *meanOUT=args-> metrics->promedio;  
+    float *wlOUT=args-> metrics->wl;
+    float *rmsOUT=args-> metrics->rms;
+    procesadotask_handle=xTaskGetCurrentTaskHandle();
     //variables para procesado 
     float mean[ADCINPUTSNUM];
     float zcb[ADCINPUTSNUM];
@@ -190,24 +210,25 @@ void procesado(void *parametros){
     int ssc[ADCINPUTSNUM];
     float diffvolts[(*num_Samples)-1];
     float sumdiffvolts[ADCINPUTSNUM]; //para hacer la sumatoria 
-     for(int i=0;i<ADCINPUTSNUM;i++){
+    while (1)
+    {
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY); //la función esperará por la notificación
+    for(int i=0;i<ADCINPUTSNUM;i++){
         mean[i] = 0;
         zcb[i] =  0;
         rms[i] = 0;
         ssc[i]=0;
         //diffvolts[i]=0;
         sumdiffvolts[i]=0;
+         //inicializa las varibles en ceros
     }
-    //inicializa las varibles en ceros para 
+    
     
     float tmp2;  // valor anterior de work
     float work=0; //valor auxiliar
     float work_tmp; //; //valor actual temporal
     float zc;
-    float *zcOUT=args->metrics->zc; //puntero el valor de salida ZC 
-    float *meanOUT=args-> metrics->promedio;  
-    float *wlOUT=args-> metrics->wl;
-    float *rmsOUT=args-> metrics->rms;
+    
     //float *x= args->voltsBuffer;
     for (uint32_t i=0;i<*num_Samples;i += SOC_ADC_DIGI_RESULT_BYTES )// que haga la suma de cuantos bytes va avanzando "creo"
     {
@@ -262,10 +283,12 @@ void procesado(void *parametros){
   *(meanOUT+k)= mean[k]/(*num_Samples);
   *(rmsOUT+k)= rms[k]/(*num_Samples);
   *(wlOUT+k)=sumdiffvolts[k]/(*num_Samples);
+//en caso de  querer mostrar en pantalla los valores (puede necesitar unos cambios para solo calcular un vector dado por y comparar usando matlab)
+//    printf("lo valores calculados del canal %i : zc: %.3f , promedio: %.3f , rms: %.3f wl: %.3f",k , zcOUT[k], meanOUT[k], rmsOUT[k], wlOUT[k] );
+    }
+    }
 
     }
-    }
-    
 
 
 
@@ -279,7 +302,8 @@ void procesado(void *parametros){
 
 void longitud_de_onda(continuous_args *structin, metricas_estadisticas *structout){ //Wave length WL
 
-} 
+}
+
 void cruces_por0(continuous_args *structin, metricas_estadisticas *structout){ //zero crossing ZC
 //float *volts = structin->voltsBuffer;
 float zc=0, *pzc;
